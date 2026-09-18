@@ -1,0 +1,45 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+}
+
+group = 'io.github.gurenicim'
+version = '1.0.0'
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    checkerFrameworkVersion = '3.49.5'
+}
+
+dependencies {
+    compileOnly "org.checkerframework:checker-qual:${checkerFrameworkVersion}"
+    compileOnly "org.checkerframework:checker:${checkerFrameworkVersion}"
+}
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+            pom {
+                name = 'qubits-checker'
+                description = 'A Checker Framework plugin that catches out-of-range qubit indices in Strange quantum programs at compile time.'
+                url = 'https://github.com/gurenicim/qubits-checker'
+                licenses {
+                    license {
+                        name = 'MIT License'
+                        url = 'https://opensource.org/licenses/MIT'
+                    }
+                }
+            }
+        }
+    }
+}
