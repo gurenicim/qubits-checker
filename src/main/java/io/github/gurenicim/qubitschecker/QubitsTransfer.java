@@ -26,7 +26,7 @@ import org.checkerframework.framework.flow.CFValue;
  * variable was mutated three statements ago" — that requires the dataflow framework's
  * flow-sensitive store, which is what this class updates.
  *
- * <p><b>Gotcha:</b> {@code super.visitMethodInvocation} returns a {@code TransferResult} whose
+ * <p><b>explanation:</b> {@code super.visitMethodInvocation} returns a {@code TransferResult} whose
  * {@code storeChanged} flag is {@code false} by default (it has no idea our custom mutation is
  * coming). If we just mutate {@code result.getRegularStore()} in place and return {@code result}
  * as-is, the analysis silently drops that mutation on the next node instead of propagating it —
