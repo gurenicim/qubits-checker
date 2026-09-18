@@ -36,6 +36,9 @@ Gates recognized: `X`, `Y`, `Z`, `Hadamard`, `Identity`, `Measurement`, `Oracle(
 
 ## Install
 
+Via [JitPack](https://jitpack.io/#gurenicim/qubits-checker) (no account, no publishing
+step on your end — it builds straight from this repo's tags):
+
 ```groovy
 plugins {
     id 'org.checkerframework' version '1.0.2'
@@ -43,13 +46,14 @@ plugins {
 
 repositories {
     mavenCentral()
+    maven { url 'https://jitpack.io' }
 }
 
 dependencies {
     implementation 'org.redfx:strange:0.1.0'
 
-    compileOnly 'io.github.gurenicim:qubits-checker:1.0.0'
-    checkerFramework 'io.github.gurenicim:qubits-checker:1.0.0'
+    compileOnly 'com.github.gurenicim:qubits-checker:v1.0.1'
+    checkerFramework 'com.github.gurenicim:qubits-checker:v1.0.1'
     checkerFramework 'org.checkerframework:checker:3.49.5'
 }
 
@@ -58,6 +62,10 @@ checkerFramework {
     checkers = ['io.github.gurenicim.qubitschecker.QubitsChecker']
 }
 ```
+
+(The Gradle coordinates use JitPack's `com.github.<user>` group; the checker's own Java
+package, used in the `checkers` list above, is unaffected and stays
+`io.github.gurenicim.qubitschecker`.)
 
 Then `./gradlew compileJava` fails the build with something like:
 

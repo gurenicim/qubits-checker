@@ -119,14 +119,14 @@ plugins {
 
 repositories {
     mavenCentral()
-    // or: maven { url 'https://jitpack.io' }
+    maven { url 'https://jitpack.io' }
 }
 
 dependencies {
     implementation 'org.redfx:strange:0.1.0'
 
-    compileOnly 'io.github.gurenicim:qubits-checker:1.0.0'
-    checkerFramework 'io.github.gurenicim:qubits-checker:1.0.0'
+    compileOnly 'com.github.gurenicim:qubits-checker:v1.0.1'
+    checkerFramework 'com.github.gurenicim:qubits-checker:v1.0.1'
     checkerFramework 'org.checkerframework:checker:3.49.5'
 }
 
