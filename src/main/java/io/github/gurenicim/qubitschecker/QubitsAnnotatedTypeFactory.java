@@ -7,6 +7,8 @@ import com.sun.source.tree.Tree;
 
 import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
+import java.util.stream.Collectors;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.TypeElement;
@@ -60,6 +62,31 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
         return AnnotationUtils.getElementValue(qubits, valueElement, String.class);
     }
 
+    /**
+     * Parses a {@code @Qubits} value back into the set of indices it represents — for a
+     * gate/step, every index some gate touches; for a {@code Program}, its single highest
+     * valid index. Kept as a sorted {@link TreeSet} so two annotations built from the same
+     * set of indices always produce the same canonical string (see {@link #indicesToValue}),
+     * which is what the qualifier hierarchy's string-equality subtyping check relies on.
+     */
+    Set<Integer> indices(AnnotationMirror qubits) {
+        Set<Integer> result = new TreeSet<>();
+        for (String part : value(qubits).split(",")) {
+            result.add(Integer.parseInt(part));
+        }
+        return result;
+    }
+
+    /** The canonical {@code @Qubits} value string for a set of indices. */
+    private static String indicesToValue(Set<Integer> indices) {
+        return indices.stream().map(String::valueOf).collect(Collectors.joining(","));
+    }
+
+    /** The highest index in {@code qubits} — the same number {@code value()} held before. */
+    int maxIndex(AnnotationMirror qubits) {
+        return indices(qubits).stream().max(Integer::compareTo).orElse(-1);
+    }
+
     boolean isQubits(AnnotationMirror a) {
         return AnnotationUtils.areSameByName(a, Qubits.class.getCanonicalName());
     }
@@ -68,6 +95,10 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
         AnnotationBuilder builder = new AnnotationBuilder(processingEnv, Qubits.class);
         builder.setValue("value", value);
         return builder.build();
+    }
+
+    AnnotationMirror createQubits(Set<Integer> indices) {
+        return createQubits(indicesToValue(indices));
     }
 
     /** The top annotation of this type system — "nothing further is known". */
@@ -93,10 +124,10 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
     }
 
     /**
-     * Tags {@code type} with {@code @Qubits(max)} where {@code max} is the highest of exactly
-     * {@code expectedArgs} literal-int constructor arguments — e.g. {@code new Cnot(0, 1)} with
-     * {@code expectedArgs=2} tags {@code @Qubits("1")}. Leaves {@code type} untouched (defaulting
-     * to {@code @UnknownQubits}) if the arg count doesn't match (e.g. {@code Cz()}'s no-arg
+     * Tags {@code type} with {@code @Qubits(indices)}, the set of exactly {@code expectedArgs}
+     * literal-int constructor arguments — e.g. {@code new Cnot(0, 1)} with {@code
+     * expectedArgs=2} tags {@code @Qubits("0,1")}. Leaves {@code type} untouched (defaulting to
+     * {@code @UnknownQubits}) if the arg count doesn't match (e.g. {@code Cz()}'s no-arg
      * overload, or {@code Oracle(matrix)}) or any argument isn't a literal.
      */
     private void annotateFromLiteralIndices(NewClassTree tree, AnnotatedTypeMirror type, int expectedArgs) {
@@ -104,15 +135,15 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
         if (args.size() != expectedArgs) {
             return;
         }
-        int max = -1;
+        Set<Integer> indices = new TreeSet<>();
         for (ExpressionTree arg : args) {
             Integer literal = literalIntValue(arg);
             if (literal == null) {
                 return;
             }
-            max = Math.max(max, literal);
+            indices.add(literal);
         }
-        type.replaceAnnotation(createQubits(String.valueOf(max)));
+        type.replaceAnnotation(createQubits(indicesToValue(indices)));
     }
 
     /**
@@ -136,11 +167,16 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
     }
 
     /**
-     * Tags a {@code new Step(...)} call with {@code @Qubits(max)}, the max over every argument
-     * that is itself a {@code Gate} with a known {@code @Qubits}. Non-{@code Gate} arguments
-     * (the optional leading {@code String name}) are ignored. If any {@code Gate} argument's
-     * index isn't statically known, the whole step is left unknown too — better to miss a check
-     * than to silently ignore one gate and wrongly clear the rest.
+     * Tags a {@code new Step(...)} call with {@code @Qubits(indices)}, the union of every
+     * argument's indices over every argument that is itself a {@code Gate} with a known {@code
+     * @Qubits}. Non-{@code Gate} arguments (the optional leading {@code String name}) are
+     * ignored. If any {@code Gate} argument's index isn't statically known, the whole step is
+     * left unknown too — better to miss a check than to silently ignore one gate and wrongly
+     * clear the rest.
+     *
+     * <p>This only computes the step's combined requirement; it doesn't check for two gates
+     * sharing an index — that's {@link #checkStepConstruction}'s job, called separately by
+     * {@link QubitsVisitor} so a thrown check doesn't get mixed into ordinary type inference.
      */
     private void annotateStep(NewClassTree tree, AnnotatedTypeMirror type) {
         TypeElement gateElement = elements.getTypeElement(GATE_INTERFACE);
@@ -148,7 +184,8 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
             return;
         }
         TypeMirror gateType = types.erasure(gateElement.asType());
-        int max = -1;
+        Set<Integer> union = new TreeSet<>();
+        boolean anyGate = false;
         for (ExpressionTree arg : tree.getArguments()) {
             TypeMirror argType = types.erasure(TreeUtils.typeOf(arg));
             if (!types.isAssignable(argType, gateType)) {
@@ -158,10 +195,11 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
             if (argQubits == null) {
                 return;
             }
-            max = Math.max(max, Integer.parseInt(value(argQubits)));
+            union.addAll(indices(argQubits));
+            anyGate = true;
         }
-        if (max >= 0) {
-            type.replaceAnnotation(createQubits(String.valueOf(max)));
+        if (anyGate) {
+            type.replaceAnnotation(createQubits(indicesToValue(union)));
         }
     }
 
@@ -175,6 +213,16 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
                     + declaredQubits + " qubits");
             this.declaredQubits = declaredQubits;
             this.usedIndex = usedIndex;
+        }
+    }
+
+    /** Thrown by {@link #checkStepConstruction}/{@link #checkAddGate} when two gates in the same step share a qubit index. */
+    static final class QubitCollision extends RuntimeException {
+        final int index;
+
+        QubitCollision(int index) {
+            super("qubit index " + index + " is used by more than one gate in the same step");
+            this.index = index;
         }
     }
 
@@ -199,9 +247,64 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
             if (stepQubits == null) {
                 continue;
             }
-            int usedIndex = Integer.parseInt(value(stepQubits));
+            int usedIndex = maxIndex(stepQubits);
             if (usedIndex >= declared) {
                 throw new QubitOutOfBounds(declared, usedIndex);
+            }
+        }
+    }
+
+    /**
+     * Checks a {@code new Step(gate...)} call: walks the same {@code Gate} arguments {@link
+     * #annotateStep} unions, but incrementally, so it can catch two gates that both touch the
+     * same qubit index instead of just combining them. Arguments whose index isn't statically
+     * known are skipped (nothing to compare), matching {@link #annotateStep}'s policy of only
+     * acting on what's known.
+     *
+     * @throws QubitCollision if two gate arguments share a qubit index
+     */
+    void checkStepConstruction(NewClassTree tree) {
+        TypeElement gateElement = elements.getTypeElement(GATE_INTERFACE);
+        if (gateElement == null) {
+            return;
+        }
+        TypeMirror gateType = types.erasure(gateElement.asType());
+        Set<Integer> seen = new TreeSet<>();
+        for (ExpressionTree arg : tree.getArguments()) {
+            TypeMirror argType = types.erasure(TreeUtils.typeOf(arg));
+            if (!types.isAssignable(argType, gateType)) {
+                continue;
+            }
+            AnnotationMirror argQubits = getAnnotatedType(arg).getPrimaryAnnotation(Qubits.class);
+            if (argQubits == null) {
+                continue;
+            }
+            for (int index : indices(argQubits)) {
+                if (!seen.add(index)) {
+                    throw new QubitCollision(index);
+                }
+            }
+        }
+    }
+
+    /**
+     * Checks a {@code step.addGate(gate)} call: compares the new gate's indices against {@code
+     * step}'s current, flow-sensitively-tracked indices (accumulated by {@link QubitsTransfer}
+     * from earlier {@code addGate} calls and/or the {@code Step} constructor) — the same way
+     * {@link #checkAddStep} compares a {@code Step} against its {@code Program}.
+     *
+     * @throws QubitCollision if the new gate reuses an index the step already has
+     */
+    void checkAddGate(ExpressionTree receiver, ExpressionTree gateArg) {
+        AnnotationMirror stepQubits = getAnnotatedType(receiver).getPrimaryAnnotation(Qubits.class);
+        AnnotationMirror gateQubits = getAnnotatedType(gateArg).getPrimaryAnnotation(Qubits.class);
+        if (stepQubits == null || gateQubits == null) {
+            return;
+        }
+        Set<Integer> existing = indices(stepQubits);
+        for (int index : indices(gateQubits)) {
+            if (existing.contains(index)) {
+                throw new QubitCollision(index);
             }
         }
     }
@@ -220,13 +323,13 @@ public class QubitsAnnotatedTypeFactory extends BaseAnnotatedTypeFactory {
         if (programQubits == null) {
             return;
         }
-        int maxValidIndex = Integer.parseInt(value(programQubits));
+        int maxValidIndex = maxIndex(programQubits);
         for (ExpressionTree stepArg : stepArgs) {
             AnnotationMirror stepQubits = getAnnotatedType(stepArg).getPrimaryAnnotation(Qubits.class);
             if (stepQubits == null) {
                 continue;
             }
-            int usedIndex = Integer.parseInt(value(stepQubits));
+            int usedIndex = maxIndex(stepQubits);
             if (usedIndex > maxValidIndex) {
                 throw new QubitOutOfBounds(maxValidIndex + 1, usedIndex);
             }

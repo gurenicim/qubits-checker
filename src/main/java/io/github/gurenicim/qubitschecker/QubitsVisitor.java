@@ -8,18 +8,21 @@ import javax.lang.model.element.ExecutableElement;
 import org.checkerframework.common.basetype.BaseTypeChecker;
 import org.checkerframework.common.basetype.BaseTypeVisitor;
 import org.checkerframework.javacutil.TreeUtils;
+import io.github.gurenicim.qubitschecker.QubitsAnnotatedTypeFactory.QubitCollision;
 import io.github.gurenicim.qubitschecker.QubitsAnnotatedTypeFactory.QubitOutOfBounds;
 
 /**
  * Reports a compile-time error wherever a gate's qubit index can be shown to exceed a Program's
- * declared qubit count — whether the gates were passed straight into {@code new Program(n,
- * steps...)}, or added later via {@code program.addStep(step)}/{@code addSteps(...)} after
- * building the step up with {@code step.addGate(...)} calls (see {@link QubitsTransfer} for how
- * that second style is tracked).
+ * declared qubit count, or where two gates in the same step are shown to touch the same qubit
+ * index — whether the gates were passed straight into {@code new Program(n, steps...)}/{@code
+ * new Step(gate...)}, or added later via {@code program.addStep(step)}/{@code addSteps(...)}
+ * and {@code step.addGate(...)} (see {@link QubitsTransfer} for how that mutating style is
+ * tracked).
  *
- * <p>This checks specifically for {@code Program}'s constructor and its {@code
- * addStep}/{@code addSteps} methods — there is only one place in this domain where "the declared
- * bound" and "the indices used against it" come together, so there is no generic
+ * <p>This checks specifically {@code Program}'s constructor and its {@code
+ * addStep}/{@code addSteps} methods, and {@code Step}'s constructor and its {@code addGate}
+ * method — the only places in this domain where "the declared bound"/"the indices already in
+ * this step" and "the indices used against it" come together, so there is no generic
  * signature-driven trigger to hang this off of.
  */
 public class QubitsVisitor extends BaseTypeVisitor<QubitsAnnotatedTypeFactory> {
@@ -31,8 +34,13 @@ public class QubitsVisitor extends BaseTypeVisitor<QubitsAnnotatedTypeFactory> {
     @Override
     public Void visitNewClass(NewClassTree tree, Void p) {
         ExecutableElement constructor = TreeUtils.elementFromUse(tree);
-        if (constructor != null && "Program".contentEquals(constructor.getEnclosingElement().getSimpleName())) {
-            report(tree, () -> atypeFactory.checkProgramConstruction(tree));
+        if (constructor != null) {
+            CharSequence className = constructor.getEnclosingElement().getSimpleName();
+            if ("Program".contentEquals(className)) {
+                report(tree, () -> atypeFactory.checkProgramConstruction(tree));
+            } else if ("Step".contentEquals(className)) {
+                report(tree, () -> atypeFactory.checkStepConstruction(tree));
+            }
         }
         return super.visitNewClass(tree, p);
     }
@@ -40,14 +48,23 @@ public class QubitsVisitor extends BaseTypeVisitor<QubitsAnnotatedTypeFactory> {
     @Override
     public Void visitMethodInvocation(MethodInvocationTree tree, Void p) {
         ExecutableElement method = TreeUtils.elementFromUse(tree);
-        if (method != null
-                && "Program".contentEquals(method.getEnclosingElement().getSimpleName())
-                && ("addStep".contentEquals(method.getSimpleName())
-                        || "addSteps".contentEquals(method.getSimpleName()))) {
-            ExpressionTree receiver = TreeUtils.getReceiverTree(tree);
-            List<? extends ExpressionTree> stepArgs = tree.getArguments();
-            if (receiver != null) {
-                report(tree, () -> atypeFactory.checkAddStep(receiver, stepArgs));
+        if (method != null) {
+            CharSequence enclosingClass = method.getEnclosingElement().getSimpleName();
+            if ("Program".contentEquals(enclosingClass)
+                    && ("addStep".contentEquals(method.getSimpleName())
+                            || "addSteps".contentEquals(method.getSimpleName()))) {
+                ExpressionTree receiver = TreeUtils.getReceiverTree(tree);
+                List<? extends ExpressionTree> stepArgs = tree.getArguments();
+                if (receiver != null) {
+                    report(tree, () -> atypeFactory.checkAddStep(receiver, stepArgs));
+                }
+            } else if ("Step".contentEquals(enclosingClass) && "addGate".contentEquals(method.getSimpleName())) {
+                ExpressionTree receiver = TreeUtils.getReceiverTree(tree);
+                List<? extends ExpressionTree> args = tree.getArguments();
+                if (receiver != null && args.size() == 1) {
+                    ExpressionTree gateArg = args.get(0);
+                    report(tree, () -> atypeFactory.checkAddGate(receiver, gateArg));
+                }
             }
         }
         return super.visitMethodInvocation(tree, p);
@@ -63,6 +80,8 @@ public class QubitsVisitor extends BaseTypeVisitor<QubitsAnnotatedTypeFactory> {
                     e.usedIndex,
                     e.declaredQubits,
                     e.declaredQubits - 1);
+        } catch (QubitCollision e) {
+            checker.reportError(tree, "program.qubit.collision", e.index);
         }
     }
 }

@@ -1,34 +1,43 @@
 # qubits-checker
 
-A Checker Framework plugin that catches out-of-range qubit indices in
+A Checker Framework plugin that catches out-of-range and colliding qubit indices in
 [Strange](https://github.com/redfx-quantum/strange) quantum programs at **compile time**,
 instead of failing at runtime (or silently doing the wrong thing).
 
 ## The problem
 
 ```java
-Program program = new Program(2);      // declares 2 qubits: indices 0 and 1
-Step step = new Step(new X(5));         // typo — qubit 5 doesn't exist
+Program program = new Program(2);       // declares 2 qubits: indices 0 and 1
+Step step = new Step(new X(5));          // typo — qubit 5 doesn't exist
 program.addStep(step);
+
+Step step2 = new Step(new X(0), new Hadamard(0));  // both gates touch qubit 0
 ```
 
 Nothing about `new X(5)` is wrong in isolation — it's only wrong *relative to* a 2-qubit
-`Program`. This checker looks at both sides together: it infers the highest qubit index every
-gate touches, tracks that through `Step` construction (including the mutating
-`step.addGate(...)` style used across most real code), and compares it against the `Program`
-it ends up in.
+`Program`. Nothing about `new Hadamard(0)` is wrong in isolation either — it's only wrong
+*relative to* the other gate already using qubit 0 in the same step. This checker looks at
+these together: it infers every qubit index each gate touches, tracks that through `Step`
+construction (including the mutating `step.addGate(...)` style used across most real code),
+and compares it against the `Program` it ends up in and against the other gates in its step.
 
 ## What it checks
 
 For every `new Program(nQubits, steps...)` call where `nQubits` is a literal:
 
-1. Infer the highest qubit index each `Gate` constructor argument touches (`new X(2)` → `2`,
-   `new Cnot(0, 1)` → `1`, `new Toffoli(0, 1, 3)` → `3`), when those arguments are themselves
-   int literals.
-2. Infer a `Step`'s requirement as the max over the gates passed to its constructor, or added
+1. Infer the qubit indices each `Gate` constructor argument touches (`new X(2)` → `{2}`,
+   `new Cnot(0, 1)` → `{0, 1}`, `new Toffoli(0, 1, 3)` → `{0, 1, 3}`), when those arguments
+   are themselves int literals.
+2. Infer a `Step`'s requirement as the union of the gates passed to its constructor, or added
    later via `addGate(...)`.
 3. Compare each step's requirement against `nQubits`. If any used index is `>= nQubits`,
    report a compile error pointing at the exact call site.
+
+Separately, for every `new Step(gate...)` call and every `step.addGate(gate)` call:
+
+4. Compare the gate's indices against the indices already used by other gates in that same
+   step (from its constructor and/or earlier `addGate` calls). If any index is shared, report
+   a compile error pointing at the exact call site.
 
 Gates recognized: `X`, `Y`, `Z`, `Hadamard`, `Identity`, `Measurement`, `Oracle(int)`,
 `ProbabilitiesGate` (single qubit index), `Cnot`, `Cz`, `Swap` (two indices), `Toffoli`
@@ -74,7 +83,13 @@ error: [program.qubit.outofbounds] Qubit index 2 is out of bounds: this Program 
 qubits, so valid indices are 0..1.
 ```
 
-wherever a gate's index doesn't fit the `Program` it's used with.
+wherever a gate's index doesn't fit the `Program` it's used with, or:
+
+```
+error: [program.qubit.collision] Qubit index 0 is used by more than one gate in the same step.
+```
+
+wherever two gates in the same step touch the same qubit index.
 
 ## Known limitation
 

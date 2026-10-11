@@ -1,6 +1,8 @@
 package io.github.gurenicim.qubitschecker;
 
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.ExecutableElement;
 import org.checkerframework.dataflow.analysis.RegularTransferResult;
@@ -17,9 +19,9 @@ import org.checkerframework.framework.flow.CFValue;
 /**
  * Discovered by naming convention off {@link QubitsChecker} (see {@code
  * BaseTypeChecker.createFlowTransferFunction}): tracks {@code step.addGate(gate)} calls
- * flow-sensitively, so a {@code Step} local variable's inferred {@code @Qubits} keeps growing to
- * the max qubit index seen across every {@code addGate} call made on it — not just the gates
- * passed into its constructor.
+ * flow-sensitively, so a {@code Step} local variable's inferred {@code @Qubits} keeps
+ * accumulating the union of qubit indices seen across every {@code addGate} call made on it —
+ * not just the gates passed into its constructor.
  *
  * <p>Ordinary type inference (the {@code TreeAnnotator} in {@link QubitsAnnotatedTypeFactory})
  * only ever sees one expression at a time, so it cannot by itself account for "this same
@@ -73,12 +75,12 @@ public class QubitsTransfer extends CFTransfer {
             // was there before (which would wrongly keep looking known).
             newQubits = atypeFactory.unknownQubits();
         } else {
-            int argValue = Integer.parseInt(atypeFactory.value(argQubits));
             AnnotationMirror existingQubits = qubitsOf(store.getValue(receiverExpr));
-            int combined = existingQubits == null
-                    ? argValue
-                    : Math.max(argValue, Integer.parseInt(atypeFactory.value(existingQubits)));
-            newQubits = atypeFactory.createQubits(String.valueOf(combined));
+            Set<Integer> combined = new TreeSet<>(atypeFactory.indices(argQubits));
+            if (existingQubits != null) {
+                combined.addAll(atypeFactory.indices(existingQubits));
+            }
+            newQubits = atypeFactory.createQubits(combined);
         }
         // insertValue() alone would MERGE with whatever value is already there (taking "the
         // stronger of the new and old value... according to the lattice" per its own javadoc) —

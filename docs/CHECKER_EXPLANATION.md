@@ -1,15 +1,15 @@
 # How the checker works
 
-This walks through how the plugin in [`src/`](../src) catches an out-of-range qubit index
-at **compile time**, in any project that builds a
+This walks through how the plugin in [`src/`](../src) catches an out-of-range or colliding
+qubit index at **compile time**, in any project that builds a
 [Strange](https://github.com/redfx-quantum/strange) `Program`/`Step`/`Gate`.
 
 ## 1. The vocabulary: three qualifiers
 
 | Qualifier | Meaning |
 |---|---|
-| `@UnknownQubits` | "The highest qubit index this expression touches isn't statically known." Default for everything. |
-| `@Qubits(value=N)` | "This expression is known to touch qubit index `N` and no higher." |
+| `@UnknownQubits` | "The qubit indices this expression touches aren't statically known." Default for everything. |
+| `@Qubits(value="i,j,...")` | "This expression is known to touch exactly these qubit indices" (a `Program` uses this the same way but with a single index — its highest valid one). |
 | `@BottomQubits` | Only used for `null`. |
 
 `@Qubits` never appears as a *declared* annotation written by a developer — `Program`/`Step`/
@@ -23,28 +23,46 @@ the code.
 `new Foo(...)` expression in the file — and recognizes three shapes:
 
 - **A gate constructor** (`new X(0)`, `new Cnot(0, 1)`, `new Toffoli(0, 1, 3)`): if every
-  constructor argument is an integer literal, tags the expression `@Qubits(max-of-the-args)`.
-- **`new Step(gate...)`**: tags the expression `@Qubits(max)` over every constructor argument
+  constructor argument is an integer literal, tags the expression `@Qubits(the-set-of-args)`.
+- **`new Step(gate...)`**: tags the expression `@Qubits(union)` over every constructor argument
   that is itself a `Gate` with a known `@Qubits`. If any gate argument's index isn't statically
   known, the whole step is left `@UnknownQubits` too, rather than silently ignoring that one gate.
 - **Anything else**: left as the default, `@UnknownQubits`.
 
-## 3. Where the check happens
+This *inference* step never throws — it just computes what a step's combined requirement is.
+Checking that requirement against something (a `Program`'s bound, or another gate's indices)
+is a separate step, described next.
 
-`QubitsVisitor.visitNewClass` fires for every `new Foo(...)` too — but only acts when `Foo` is
-`Program`. It calls `QubitsAnnotatedTypeFactory.checkProgramConstruction`, which:
+## 3. Where the checks happen
+
+Two independent things are checked, both driven from `QubitsVisitor`, both by calling into
+`QubitsAnnotatedTypeFactory` and catching the exception it throws on failure — `visitNewClass`
+also fires for every `new Foo(...)`, but only acts when `Foo` is `Program` or `Step`.
+
+**Bounds** — `checkProgramConstruction`, called for `new Program(...)`:
 
 1. Reads the first constructor argument (`nQubits`) as a literal. If it isn't one, gives up —
    nothing to check against.
-2. For each remaining `Step` argument, reads its inferred `@Qubits`. If unknown, skips it
-   (nothing to compare).
-3. If a step's used index is `>= nQubits`, throws `QubitOutOfBounds`.
+2. For each remaining `Step` argument, reads its inferred `@Qubits` and takes its highest
+   index. If unknown, skips it (nothing to compare).
+3. If a step's highest used index is `>= nQubits`, throws `QubitOutOfBounds`.
 
-The visitor catches that exception and calls
-`checker.reportError(tree, "program.qubit.outofbounds", ...)`, which looks up the template in
+**Collisions** — `checkStepConstruction`, called for `new Step(gate...)`:
+
+1. Walks the same `Gate` constructor arguments `annotateStep` unions, but incrementally,
+   accumulating a `seen` set of indices.
+2. If a gate's index is already in `seen`, throws `QubitCollision` — two gates in this step
+   both touch that index.
+
+Both are also checked for the mutating style (`program.addStep(...)`/`step.addGate(...)`) —
+see §5.
+
+The visitor catches whichever exception comes back and calls `checker.reportError(tree, ...)`
+with the matching message key (`program.qubit.outofbounds` or `program.qubit.collision`),
+which looks up the template in
 [`messages.properties`](../src/main/resources/io/github/gurenicim/qubitschecker/messages.properties)
-and attaches a compiler error to the `new Program(...)` call's exact source line. If any error
-is reported anywhere in the file, `javac` fails the build and never emits a `.class` file.
+and attaches a compiler error to the exact source line. If any error is reported anywhere in
+the file, `javac` fails the build and never emits a `.class` file.
 
 ## 4. A full trace
 
@@ -57,10 +75,12 @@ Program badProgram = new Program(2, badStep);
 - `new Step(new X(2))`: sees class `Step`, one `Gate`-typed argument with `@Qubits("2")`
   → tags the whole `new Step(...)` expression `@Qubits("2")`. The framework's flow analysis
   now remembers `badStep` is `@Qubits("2")` at every later use — no extra code needed for
-  that part.
+  that part. (`checkStepConstruction` also runs here, but with only one gate there's nothing
+  to collide with.)
 - `new Program(2, badStep)`: `QubitsVisitor.visitNewClass` sees the constructor is `Program`'s,
   calls `checkProgramConstruction`. First arg `2` is a literal → `declared = 2`. Second arg
-  `badStep` has `@Qubits("2")` → `usedIndex = 2`. `2 >= 2` → throws `QubitOutOfBounds(2, 2)`.
+  `badStep` has `@Qubits("2")`, whose highest index is `2` → `usedIndex = 2`. `2 >= 2` →
+  throws `QubitOutOfBounds(2, 2)`.
 - Visitor catches it, reports:
   `error: [program.qubit.outofbounds] Qubit index 2 is out of bounds: this Program declares 2
   qubits, so valid indices are 0..1.`
@@ -87,7 +107,15 @@ checkers use to remember `x != null` after an `if` check.
 class named `<X>Transfer` next to `<X>Checker`, the same way it finds `<X>Visitor` and
 `<X>AnnotatedTypeFactory`. Its `visitMethodInvocation` fires for every method call node in the
 CFG; it filters for `Step.addGate(gate)` calls and, for those, updates the store entry for the
-receiver (`step`) to the max of its current tracked value and the new gate's index.
+receiver (`step`) to the *union* of its current tracked indices and the new gate's indices —
+purely bookkeeping, same as `annotateStep`, so it never throws.
+
+The collision check for this mutating style lives in `QubitsVisitor.visitMethodInvocation`
+instead: it also fires for `Step.addGate(gate)` calls, and calls `checkAddGate`, which reads
+the receiver's *current* `@Qubits` (i.e. before this call — the flow-sensitive value
+`QubitsTransfer` accumulated from earlier `addGate` calls and/or the constructor) and compares
+it against the new gate's indices, throwing `QubitCollision` if they overlap. This mirrors how
+`checkAddStep` (also in the visitor) compares a `Step` against its `Program`'s bound.
 
 `QubitsVisitor` also checks `program.addStep(step)`/`addSteps(...)` calls directly (via
 `checkAddStep`), comparing the receiver `Program`'s tagged bound against each `Step` argument's
@@ -138,8 +166,9 @@ checkerFramework {
 
 From then on, `./gradlew compileJava` fails with a compiler error at the exact
 `new Program(...)`/`addStep(...)` call site whenever a gate's qubit index would be out of
-bounds — instead of that mistake surfacing later as a runtime exception (or silently wrong
-output) when the program actually runs.
+bounds, or at the exact `new Step(...)`/`addGate(...)` call site whenever two gates in the
+same step would touch the same qubit — instead of either mistake surfacing later as a runtime
+exception (or silently wrong output) when the program actually runs.
 
 ## 7. Known limitation
 
@@ -152,8 +181,8 @@ runtime (a loop variable, a method parameter) is left unchecked rather than gues
 |---|---|
 | `qual/Qubits.java`, `UnknownQubits.java`, `BottomQubits.java` | The three qualifiers. |
 | `QubitsQualifierHierarchy.java` | Defines subtyping: two `@Qubits` relate only via exact `value` match. |
-| `QubitsAnnotatedTypeFactory.java` | Infers `@Qubits` from gate/step/program constructor shapes; exposes `checkProgramConstruction` and `checkAddStep`. |
-| `QubitsTransfer.java` | Flow-sensitively tracks `step.addGate(...)` calls across statements. |
-| `QubitsVisitor.java` | Calls the two check methods at `Program` constructors and `addStep`/`addSteps` calls; reports the compile error. |
+| `QubitsAnnotatedTypeFactory.java` | Infers `@Qubits` from gate/step/program constructor shapes; exposes `checkProgramConstruction`, `checkStepConstruction`, `checkAddStep`, and `checkAddGate`. |
+| `QubitsTransfer.java` | Flow-sensitively tracks `step.addGate(...)` calls across statements (unions indices; doesn't check). |
+| `QubitsVisitor.java` | Calls the four check methods at `Program`/`Step` constructors and `addStep`/`addSteps`/`addGate` calls; reports the compile error. |
 | `QubitsChecker.java` | Empty entry point, wired by naming convention. |
 | `messages.properties` | The error message template. |
